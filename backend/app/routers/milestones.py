@@ -7,6 +7,7 @@ from ..database import get_db
 from ..models import (
     Milestone,
     Project,
+    ProjectStatus,
     User,
     UserRole,
     MilestoneStatus
@@ -61,7 +62,11 @@ def create_milestone(
     db.add(new_milestone)
     db.commit()
     db.refresh(new_milestone)
-
+    if project.status == ProjectStatus.CREATED:
+        project.status = ProjectStatus.IN_PROGRESS
+        db.commit()
+        db.refresh(project)
+    
     return new_milestone
 
 
@@ -149,28 +154,44 @@ def approve_milestone(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """Only AUDITOR users can approve milestones"""
     require_role([UserRole.AUDITOR])(current_user)
-
-    milestone = db.query(Milestone).filter(
-        Milestone.id == milestone_id
-    ).first()
-
+    
+    milestone = db.query(Milestone).filter(Milestone.id == milestone_id).first()
+    
     if not milestone:
-        raise HTTPException(status_code=404, detail="Milestone not found")
-
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Milestone not found"
+        )
+    
     if milestone.status != MilestoneStatus.PENDING:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Milestone is already {milestone.status.value}"
         )
-
+    
     milestone.status = MilestoneStatus.APPROVED
     milestone.auditor_id = current_user.id
     milestone.approved_at = datetime.utcnow()
-
+    
     db.commit()
     db.refresh(milestone)
-
+  
+    project = db.query(Project).filter(Project.id == milestone.project_id).first()
+    
+    if project and project.status != ProjectStatus.COMPLETED:
+        # Calculate total approved amount
+        total_approved = db.query(func.sum(Milestone.requested_amount)).filter(
+            Milestone.project_id == milestone.project_id,
+            Milestone.status == MilestoneStatus.APPROVED
+        ).scalar() or 0
+        
+        # If total approved amount equals or exceeds budget, mark as completed
+        if total_approved >= project.budget:
+            project.status = ProjectStatus.COMPLETED
+            db.commit()
+    
     return milestone
 
 
